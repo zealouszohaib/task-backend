@@ -2,8 +2,6 @@ const multer = require('multer');
 const path = require('path');
 const { processImageWithGroq } = require('../helper/processImageWithGroq');
 
-const convertPdfToImage = require('../helper/convertPdfToImage');
-
 
 const storage = multer.diskStorage({
   destination: (req, file, cb) => {
@@ -36,19 +34,19 @@ const uploadFile = async (req, res) => {
 
 
       let processedData;
-      if (req.file.mimetype === 'application/pdf') {
-        // Convert PDF to images
-        const imagePaths = await convertPdfToImage(filePath); // Now correctly returns array
-        // Process each image
-        processedData = [];
-        for (const imgPath of imagePaths) {
-          const data = await processImageWithGroq(imgPath);
-          processedData.push(data);
-        }
-      } else {
+      // if (req.file.mimetype === 'application/pdf') {
+      //   // Convert PDF to images
+      //   const imagePaths = await convertPdfToImage(filePath); // Now correctly returns array
+      //   // Process each image
+      //   processedData = [];
+      //   for (const imgPath of imagePaths) {
+      //     const data = await processImageWithGroq(imgPath);
+      //     processedData.push(data);
+      //   }
+      // } else {
         // Process as image
         processedData = await processImageWithGroq(filePath);
-      }
+      // }
      
 
       res.json({
