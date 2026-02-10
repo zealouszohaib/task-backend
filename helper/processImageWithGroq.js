@@ -1,11 +1,63 @@
 const { Groq } = require('groq-sdk');
 const fs = require('fs');
 const dotenv = require('dotenv');
-const { validateTreeData } = require('./validateTreeData');
 dotenv.config()
 
 
 const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
+
+function parseAndRepairJson(raw) {
+  // 1. Try direct parse
+  try { return JSON.parse(raw); } catch (_) {}
+
+  let fixed = raw;
+
+  // 2. Remove single-line comments (// ...)
+  fixed = fixed.replace(/\/\/[^\n]*/g, '');
+
+  // 3. Remove multi-line comments (/* ... */)
+  fixed = fixed.replace(/\/\*[\s\S]*?\*\//g, '');
+
+  // 4. Remove trailing commas before } or ]
+  fixed = fixed.replace(/,\s*([}\]])/g, '$1');
+
+  // 5. Replace single-quoted strings with double-quoted
+  fixed = fixed.replace(/'([^']*?)'/g, '"$1"');
+
+  // 6. Try parsing after fixes
+  try { return JSON.parse(fixed); } catch (_) {}
+
+  // 7. Try to fix truncated JSON by closing open brackets/braces
+  let openBraces = 0;
+  let openBrackets = 0;
+  let inString = false;
+  let escaped = false;
+  for (const ch of fixed) {
+    if (escaped) { escaped = false; continue; }
+    if (ch === '\\') { escaped = true; continue; }
+    if (ch === '"') { inString = !inString; continue; }
+    if (inString) continue;
+    if (ch === '{') openBraces++;
+    else if (ch === '}') openBraces--;
+    else if (ch === '[') openBrackets++;
+    else if (ch === ']') openBrackets--;
+  }
+
+  // Close unclosed strings/brackets/braces
+  if (inString) fixed += '"';
+  // Remove any trailing comma before closing
+  fixed = fixed.replace(/,\s*$/, '');
+  for (let i = 0; i < openBrackets; i++) fixed += ']';
+  for (let i = 0; i < openBraces; i++) fixed += '}';
+  // Clean trailing commas again after closing
+  fixed = fixed.replace(/,\s*([}\]])/g, '$1');
+
+  try { return JSON.parse(fixed); } catch (e) {
+    console.error('Failed to repair JSON:', e.message);
+    console.error('Problematic JSON string:', raw.substring(0, 500));
+    return null;
+  }
+}
 
 async function processImageWithGroq(imagePath) {
   try {
@@ -61,7 +113,7 @@ async function processImageWithGroq(imagePath) {
       ],
       model: "meta-llama/llama-4-scout-17b-16e-instruct",
       temperature: 0.7,
-      max_completion_tokens: 4024,
+      max_completion_tokens: 8192,
       top_p: 1,
       stream: false,
       stop: null
@@ -71,44 +123,35 @@ async function processImageWithGroq(imagePath) {
 
     raw = raw.replace(/```json|```/g, '').trim();
 
-    try {
-      // Try to parse the response
-      const parsedData = JSON.parse(raw);
-
-      // Validate the structure
-      if (!parsedData.name || !Array.isArray(parsedData.children)) {
-        console.error('Invalid tree structure:', parsedData);
-        return {
-          name: "Invalid tree structure",
-          children: []
-        };
-      }
-
-      return parsedData;
-    } catch (parseError) {
-      console.error('JSON Parse Error:', parseError);
-      console.error('Problematic JSON string:', raw);
-
-      try {
-        // Replace single quotes with double quotes
-        const fixedJson = raw.replace(/'/g, '"');
-        const parsedData = JSON.parse(fixedJson);
-
-        if (!parsedData.name || !Array.isArray(parsedData.children)) {
-          throw new Error('Invalid structure after fixing');
-        }
-
-        validateTreeData(parsedData);
-
-        return parsedData;
-      } catch (fixError) {
-        console.error('Failed to fix JSON:', fixError);
-        return {
-          name: "Error parsing response",
-          children: []
-        };
-      }
+    // Extract only the JSON portion (first [ or { to last ] or })
+    const jsonStart = raw.search(/[\[{]/);
+    if (jsonStart > 0) {
+      raw = raw.slice(jsonStart);
     }
+    const lastBracket = Math.max(raw.lastIndexOf(']'), raw.lastIndexOf('}'));
+    if (lastBracket !== -1 && lastBracket < raw.length - 1) {
+      raw = raw.slice(0, lastBracket + 1);
+    }
+
+    const parsedData = parseAndRepairJson(raw);
+
+    if (!parsedData) {
+      console.error('Failed to parse JSON from Groq response');
+      return { name: "Error parsing response", children: [] };
+    }
+
+    // Validate structure — handle both array and object responses
+    if (Array.isArray(parsedData)) {
+      if (parsedData.length === 1) return parsedData[0];
+      return { name: "Root", children: parsedData };
+    }
+
+    if (parsedData.name && Array.isArray(parsedData.children)) {
+      return parsedData;
+    }
+
+    console.error('Invalid tree structure:', parsedData);
+    return { name: "Invalid tree structure", children: [] };
   } catch (error) {
     console.error('Error processing image with Groq:', error);
     throw error;
